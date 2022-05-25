@@ -1,0 +1,233 @@
+---
+title: "Maternal Care Writeup"
+subtitle: "Analysis of juvenile survival"
+output: 
+  rmdformats::readthedown
+date: '2022-05-20'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(tidyverse.quiet = TRUE)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(RMySQL)
+library(lme4)
+```
+
+
+Here we will walk through the analysis.
+
+## Data Preparation
+
+In the `r_scripts/data-cleaning.R` file I fiiltered for juveniles and got rid of the individuals that were run a second time by April in 2017 and 2018. We then impute parturition dates using a simple model which can be found in `model-training.R`
+
+
+```{r}
+personality = read_csv('data/personality-mrw-imputed.csv', show_col_types = F)
+
+glimpse(personality)
+```
+
+There are still some individuals who do not have part dates. Most of these are individuals who do not have litter ids. 
+
+If they do have litter ids then they dont have n1 dates or weights. These could probably be recovered using some fancy model that uses mating chase data, trapping data, etc but I don't bother with that here. 
+```{r}
+personality %>% 
+  filter(is.na(part)) %>% 
+  select(squirrel_id, year, litter_id, dam_id, n1_date)
+```
+The next step is to include survival data to both the fall census and to 200 days. The data here can be generated with the `r_scripts/survival_data.R`.
+
+
+## Data prep
+
+First, we'll get the variables in the right format for the analysis.
+
+```{r}
+personality = read_csv('data/personality-mrw-survival.csv', show_col_types = FALSE) %>% 
+  mutate(survival = as.integer(survived_200d)) %>% 
+  group_by(grid, year) %>% 
+  mutate(growth_sc = scale(growth, scale = T, center = T)[,1],
+         part_sc = scale(part, scale = T, center = T)[,1]) %>% 
+  ungroup() 
+```
+
+
+Now, well add the loadings for the principle components for aggression and activity 
+
+```{r}
+aggression = personality %>% 
+  select(front, back, attack, attacklatency, approachlatency) %>% 
+  mutate(across(everything(), ~if_else(is.na(.x), median(.x, na.rm = TRUE), .x))) 
+
+
+activity = personality %>% 
+  select(walk, still, hang, jump, chew, hole) %>% 
+  mutate(across(everything(), ~if_else(is.na(.x), median(.x, na.rm = TRUE), .x)))
+
+pca_agg = prcomp(aggression, scale = TRUE, center = TRUE)
+mis1 = predict(pca_agg)[,1]
+
+pca_act = prcomp(activity, scale = TRUE, center = TRUE)
+oft1 = predict(pca_act)[,1]
+
+personality$oft1 = unlist(oft1)
+personality$mis1 = unlist(mis1)
+```
+
+
+Just to show the data we can plot it here. These are the two PCs with a 95% ellipse.
+
+```{r}
+ggplot(personality, aes(oft1, mis1)) +
+  geom_point(size = 0.75) +
+  stat_ellipse(level = 0.95) +
+  labs(x = "Activity (PC1)", y = "Aggression (PC1)") +
+  theme_minimal() +
+  theme(plot.margin = margin(20,20,20,20))
+```
+
+
+## Survival to Fall Census
+
+```{r, warning=FALSE,message=FALSE}
+dat1 = personality %>% 
+  mutate(across(c(year, dam_id, litter_id, grid), as_factor)) %>%
+  filter(year != 2019,
+         !if_any(c(survival, sex, age_at_trial, grid_density, growth_sc, part_sc, oft1, mis1, grid, year, dam_id, litter_id), .fns = is.na))
+
+survival_to_autumn = glmer(made_it ~ sex + 
+                             scale(age_at_trial) + 
+                             part_sc*scale(grid_density) +
+                             growth_sc*scale(grid_density) + 
+                             oft1*mis1*scale(grid_density) + 
+                             grid +
+                             (1|year) + 
+                             (1|dam_id) + 
+                             (1|litter_id), 
+                           data = dat1,
+                           na.action = 'na.omit',
+                           family = binomial(link = "logit"),
+                           control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e8)))
+```
+  
+```{r, warning=FALSE, message=FALSE}
+car::Anova(survival_to_autumn)
+```
+
+First thing we see is that there is a singificant interaction between grid density and aggression as well as a nearly significant main effect of aggression, and  a nearly significant interaction between aggression and activity.
+
+
+## Survival to 200 days
+
+```{r, warning=FALSE,message=FALSE}
+dat2 = personality %>% 
+  mutate(across(c(year, dam_id, litter_id, grid), as_factor)) %>%
+  filter(!if_any(c(survival, sex, age_at_trial, grid_density, growth_sc, part_sc, oft1, mis1, grid, year, dam_id, litter_id), .fns = is.na))
+
+survival_to_200d = glmer(survival ~ sex + 
+                             scale(age_at_trial) + 
+                             part_sc*scale(grid_density) +
+                             growth_sc*scale(grid_density) + 
+                             oft1*mis1*scale(grid_density) + 
+                             grid +
+                             (1|year) + 
+                             (1|dam_id) + 
+                             (1|litter_id), 
+                           data = dat2,
+                           na.action = 'na.fail',
+                           family = binomial(link = "logit"),
+                           control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 1e8)))
+```
+
+```{r}
+car::Anova(survival_to_200d)
+```
+
+Here we see a significant effect of activity and density, as well as an effect of sex. 
+
+
+### Model effects
+
+```{r, warning=FALSE, message=FALSE}
+summary(survival_to_autumn)
+```
+
+So, we see males have lower survival survival than males
+
+```{r, echo =FALSE}
+dat1 %>% 
+  filter(year != 2021) %>% 
+  group_by(year, sex) %>% 
+  summarize(n = n(),
+            survival = sum(made_it), .groups = "drop",
+            survival_rate = survival/n) %>% 
+  ggplot(aes(x = sex, y = survival_rate, fill = sex, label = n)) +
+    geom_bar(stat = 'identity') +
+    ylim(c(0,1)) +
+    facet_wrap(~year) +
+    theme_minimal() +
+    theme(legend.position = "none",
+          plot.margin = margin(20,20,20,20)) +
+    geom_text(size = 3, vjust = 1)
+```
+
+Next we see that aggression has a negative relationship with survival, with more aggressive individuals less likely to survive.
+
+
+> Will need to add a trend line here but had some issues.
+
+
+```{r, echo = FALSE}
+n_points = 500
+preds = data.frame(sex = "F",
+           age_at_trial = mean(dat1$age_at_trial),
+           part_sc = 0,
+           grid_density = 0,
+           growth_sc = median(dat1$growth),
+           oft1 = mean(dat1$oft1),
+           mis1 = seq(min(dat1$mis1)-1, max(dat1$mis1), length.out = n_points),
+           grid = "KL")
+
+preds$response = predict(survival_to_autumn, newdata = preds, re.form = NA, type = "response")
+
+ggplot(preds, aes(x = mis1, y = response)) + 
+  geom_line() +
+  geom_point(data = dat1, aes(x = mis1, y = made_it), size = 0.5, alpha = 0.5) +
+  scale_y_continuous(breaks = c(0,1)) +
+  labs(x = "Aggression (PC1)", y = "Survival to Autumn") +
+  theme_minimal()
+```
+
+> This is a simplified plit that only accounts for a single level of sex and grid. However it captures the main effect
+
+
+Finally, we have a significant interaction between grid density and aggression, where more aggressive individuals are more likely to survive to autumn under high densities.
+
+> There is no good way to visualize this.
+
+Here we look at individual's link-predicted value of survival to autumn.
+
+```{r, echo = FALSE}
+newdat = dat1 %>% 
+  select(grid_density, mis1, made_it)
+newdat$preds = predict(survival_to_autumn)
+
+ggplot(newdat, aes(x = grid_density, y = preds)) +
+  geom_jitter(aes(color = mis1), size = 0.5, width = 0.025) +
+  scale_color_gradient(low = "#f9c929", high = "#9f025e") +
+  labs(x = "Grid Density", y = "Response") +
+  theme_minimal() 
+```
+
+ 
+```{r}
+summary(survival_to_200d)
+```
+
+
+
