@@ -8,9 +8,15 @@ library(RMySQL)
 
 con = dbConnect(MySQL(), group = 'krsp-aws')
 
-personality = read_csv('mrw-scripts/data/personality-mrw-imputed.csv', show_col_types = FALSE)
+personality = read_csv('data/personality-mrw-imputed.csv', show_col_types = FALSE)
 
 # Load in file created from data-cleaning.R and calculate ages and growth rates
+
+censi = tbl(con, "census") %>% 
+  filter(MONTH(census_date) == 8) %>% 
+  mutate(census_year = YEAR(census_date), made_it = 1) %>% 
+  select(squirrel_id, census_year, made_it) %>% 
+  collect()
 
 personality = tbl(con, 'flastall2') %>% 
   select(squirrel_id, dates, f1, byear, litter_id, dam_id, datee, f2) %>% 
@@ -26,15 +32,14 @@ personality = tbl(con, 'flastall2') %>%
 
 
 query = "select * from krsp2022.trapping"
-
-dbGetQuery(con, query)
+dbGetQuery(con, query) # I dont have access :(
 
 # Well also pull in grid densities here as well
 
-query = read_file('mrw-scripts/sql_scripts/grid_density.sql')
+query = read_file('scripts/sql/grid_density.sql')
 grids_density = dbGetQuery(con, query) %>% 
   select(grid, year = Year, grid_density = spr_density)
 
 # Write the new file
 personality = left_join(personality, grids_density, by = c("grid", "year"))
-write_csv(personality, file = 'mrw-scripts/data/personality-mrw-survival.csv')
+write_csv(personality, file = 'data/personality-mrw-survival.csv')
